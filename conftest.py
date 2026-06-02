@@ -8,4 +8,9 @@ import sys
 import os
 
 # Ajouter la racine du projet au PYTHONPATH
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
+
+# Configurer AIRFLOW_HOME pour les tests de structure
+if "AIRFLOW_HOME" not in os.environ:
+    os.environ["AIRFLOW_HOME"] = project_root
