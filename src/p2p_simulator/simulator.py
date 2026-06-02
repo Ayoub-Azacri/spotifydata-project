@@ -21,7 +21,7 @@ import random
 import signal
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import redis
@@ -137,76 +137,60 @@ class P2PSimulator:
     def _generate_listening_event(self) -> dict:
         """
         Génère un événement d'écoute.
-
-        TODO : compléter ce squelette pour générer un événement réaliste.
-        Champs attendus :
-            - event_id     : UUID unique
-            - user_id      : UUID utilisateur (depuis SAMPLE_USERS)
-            - track_id     : UUID du morceau (depuis SAMPLE_TRACKS)
-            - source_peer  : UUID du peer qui sert le morceau
-            - timestamp    : ISO 8601 (datetime.utcnow())
-            - duration_ms  : durée écoutée (entre 30 000 et track.duration_ms)
-            - device_type  : depuis DEVICE_TYPES
-            - geo_country  : depuis GEO_COUNTRIES
-            - completed    : bool (True si duration_ms > 30s)
-            - event_source : depuis EVENT_SOURCES
-
-        En mode "fraud" (Phase 2) :
-            - 30% des events : duration_ms < 5000 (écoute trop courte = bot)
-            - 10% : même user_id sur 20 tracks en <10 secondes
-
-        En mode "late_events" (Phase 2) :
-            - timestamp décalé de -5 à -30 minutes dans le passé
         """
         track = random.choice(SAMPLE_TRACKS)
-
-        # TODO : compléter ici
+        duration_ms = random.randint(30000, track["duration_ms"])
+        
         event = {
             "event_id":    str(uuid.uuid4()),
             "user_id":     random.choice(SAMPLE_USERS),
             "track_id":    track["id"],
             "source_peer": random.choice(self.active_peers),
-            "timestamp":   datetime.utcnow().isoformat() + "Z",
-            # À compléter...
+            "timestamp":   datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "duration_ms": duration_ms,
+            "device_type": random.choice(DEVICE_TYPES),
+            "geo_country": random.choice(GEO_COUNTRIES),
+            "completed":   duration_ms > 30000,
+            "event_source": random.choice(EVENT_SOURCES)
         }
 
-        # Mode fraud (Phase 2) — décommenter
-        # if self.mode == "fraud" and random.random() < 0.3:
-        #     event["duration_ms"] = random.randint(100, 4999)
-        #     event["completed"] = False
+        # Mode fraud (Phase 2)
+        if self.mode == "fraud" and random.random() < 0.3:
+            event["duration_ms"] = random.randint(100, 4999)
+            event["completed"] = False
 
-        # Mode late_events (Phase 2) — décommenter
-        # if self.mode == "late_events" and random.random() < 0.4:
-        #     delay_minutes = random.randint(5, 30)
-        #     ts = datetime.utcnow() - timedelta(minutes=delay_minutes)
-        #     event["timestamp"] = ts.isoformat() + "Z"
+        # Mode late_events (Phase 2)
+        if self.mode == "late_events" and random.random() < 0.4:
+            delay_minutes = random.randint(5, 30)
+            ts = datetime.now(timezone.utc) - timedelta(minutes=delay_minutes)
+            event["timestamp"] = ts.isoformat() + "Z"
 
         return event
 
     def _generate_p2p_network_event(self) -> dict:
         """
         Génère un événement réseau P2P.
-
-        TODO : compléter pour générer des événements de type :
-            - peer_connect    : un peer rejoint le réseau
-            - peer_disconnect : un peer quitte le réseau
-            - chunk_transfer  : transfert d'un chunk audio entre peers
-            - cache_hit       : le morceau était en cache local
-            - cache_miss      : téléchargement depuis un autre peer nécessaire
         """
         event_type = random.choice([
             "peer_connect", "peer_disconnect",
             "chunk_transfer", "cache_hit", "cache_miss"
         ])
 
-        # TODO : compléter selon event_type
         event = {
             "event_id":   str(uuid.uuid4()),
             "event_type": event_type,
             "peer_id":    random.choice(self.active_peers),
-            "timestamp":  datetime.utcnow().isoformat() + "Z",
-            # À compléter...
+            "timestamp":  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
+
+        if event_type == "chunk_transfer":
+            event["target_peer"] = random.choice(self.active_peers)
+            event["chunk_id"] = str(uuid.uuid4())
+            event["size_bytes"] = random.randint(1024, 1024 * 1024)
+        
+        if event_type in ["cache_hit", "cache_miss"]:
+            event["track_id"] = random.choice(SAMPLE_TRACKS)["id"]
+
         return event
 
     # ── Publication ──────────────────────────────────────────
@@ -217,25 +201,35 @@ class P2PSimulator:
         channel = TOPICS[topic_key]
 
         self._publish_to_redis(channel, payload)
-        # Phase 2 — décommenter
-        # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
+        # Phase 2 — décommenter quand Kafka est prêt
+        # self._publish_to_kafka(channel, event.get("user_id", event.get("peer_id", "")), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
         """
-        TODO : publier payload dans le channel Redis via pub/sub.
-        Utiliser self.redis.publish(channel, payload)
-        Gérer l'exception si Redis est indisponible (log + skip).
+        Publie payload dans le channel Redis via pub/sub et lpush dans une LIST.
         """
-        raise NotImplementedError("TODO : implémenter _publish_to_redis()")
+        try:
+            # 1. Pub/Sub (pour Spark Phase 2)
+            self.redis.publish(channel, payload)
+            
+            # 2. LIST (pour Airflow Phase 1)
+            list_key = f"list:{channel}"
+            self.redis.lpush(list_key, payload)
+            # Limiter la taille de la liste pour éviter l'explosion mémoire (ex: 10000 derniers events)
+            self.redis.ltrim(list_key, 0, 9999)
+            
+        except Exception as e:
+            logger.error(f"Échec de publication Redis sur {channel} : {e}")
 
     # def _publish_to_kafka(self, topic: str, key: str, payload: str):
     #     """
     #     TODO Phase 2 : publier payload dans le topic Kafka.
-    #     - key     : utilisé pour le partitionnement (user_id ou peer_id)
-    #     - acks    : 'all' pour la durabilité
-    #     - Gérer le callback de confirmation (delivery_report)
     #     """
-    #     raise NotImplementedError("TODO Phase 2 : implémenter _publish_to_kafka()")
+    #     try:
+    #         self.kafka_producer.produce(topic, key=key, value=payload)
+    #         self.kafka_producer.poll(0)
+    #     except Exception as e:
+    #         logger.error(f"Échec de publication Kafka sur {topic} : {e}")
 
     def _shutdown(self, signum, frame):
         logger.info(f"Arrêt du simulateur (signal {signum}) — {self.event_count} événements publiés")
