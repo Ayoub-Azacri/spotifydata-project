@@ -152,4 +152,3 @@ with DAG(
 
     wait_for_events >> [top_tracks, artist_stats, p2p_metrics]
     update_aggregates(top_tracks, artist_stats, p2p_metrics)
-# test force change
