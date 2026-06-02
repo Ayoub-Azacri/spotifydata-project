@@ -29,36 +29,37 @@ docker exec airflow-scheduler airflow tasks clear <dag_id> -t <task_id> --yes
 docker compose restart airflow-worker
 ```
 
-**Cause probable :** → À compléter par votre groupe après avoir rencontré cet incident
+**Cause probable :** Souvent causé par un `ExternalTaskSensor` qui attend une tâche qui a échoué silencieusement, ou par une fuite de connexion à la base de données.
 
 ---
 
-### INC-02 — PostgreSQL : `too many connections`
+### INC-02 — Saturation de la Dead Letter Queue (DLQ)
 
-**Symptômes :** Les tâches Airflow échouent avec `FATAL: too many connections`.
+**Symptômes :** Le `dlq_reprocessing_pipeline` tourne mais le nombre d'événements dans `dead_letter_events` avec le statut `abandoned` ou `pending` augmente rapidement.
 
 **Diagnostic :**
 ```sql
-SELECT count(*), state FROM pg_stat_activity GROUP BY state;
-SELECT max_conn FROM pg_settings WHERE name='max_connections';
+SELECT status, error_type, count(*) FROM dead_letter_events GROUP BY status, error_type;
 ```
 
 **Résolution :**
 ```bash
-# Augmenter max_connections dans docker-compose
-# PostgreSQL environment: POSTGRES_MAX_CONNECTIONS: 200
+# 1. Identifier la cause (ex: changement de format JSON dans le simulateur P2P).
+# 2. Stopper l'ingestion si la corruption est massive.
+docker compose exec airflow-scheduler airflow dags pause streaming_events_pipeline
 
-# Court terme : killer les connexions idle
-# SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle';
+# 3. Corriger le code de validation (src/transformations/events.py).
+# 4. Remettre les événements abandonnés en 'pending' pour un nouveau test.
+docker compose exec postgres psql -U airflow -d spotify -c "UPDATE dead_letter_events SET status='pending', retry_count=0 WHERE status='abandoned';"
 ```
 
-**Prévention :** → À compléter (hint : Airflow pools)
+**Prévention :** Mettre en place des alertes Slack/Email si la DLQ dépasse un certain seuil.
 
 ---
 
 ### INC-03 — MinIO inaccessible depuis Airflow
 
-**Symptômes :** Les tâches de lecture/écriture Parquet échouent avec `Connection refused`.
+**Symptômes :** Les tâches de lecture/écriture Parquet (`extract_from_minio` ou `store_to_parquet`) échouent avec `Connection refused` ou `NoSuchKey`.
 
 **Diagnostic :**
 ```bash
@@ -69,8 +70,9 @@ curl http://localhost:9000/minio/health/live
 **Résolution :**
 ```bash
 docker compose restart minio
-# Attendre 10s puis relancer le DAGRun
+# Attendre 10s puis relancer le DAGRun (Airflow le fera automatiquement via les 'retries')
 ```
+
 
 ---
 
