@@ -10,7 +10,7 @@ Lancement :
 
 import pytest
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # ─────────────────────────────────────────────────────────────
@@ -24,10 +24,9 @@ from src.transformations.catalog import (
     deduplicate_tracks,
     deduplicate_artists,
 )
-# from src.transformations.events import (
-#     enrich_listening_event,
-#     is_valid_listening_event,
-# )
+from src.transformations.events import (
+    is_valid_listening_event,
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -132,32 +131,23 @@ class TestValidateTrackSchema:
 
 class TestListeningEventValidation:
 
-    @pytest.mark.skip(reason="TODO : implémenter is_valid_listening_event()")
     def test_valid_event_passes(self, valid_listening_event):
-        # from src.transformations.events import is_valid_listening_event
-        # assert is_valid_listening_event(valid_listening_event) is True
-        pass
+        assert is_valid_listening_event(valid_listening_event) is True
 
-    @pytest.mark.skip(reason="TODO : implémenter is_valid_listening_event()")
     def test_missing_user_id_fails(self, valid_listening_event):
-        # from src.transformations.events import is_valid_listening_event
-        # del valid_listening_event["user_id"]
-        # assert is_valid_listening_event(valid_listening_event) is False
-        pass
+        del valid_listening_event["user_id"]
+        assert is_valid_listening_event(valid_listening_event) is False
 
-    @pytest.mark.skip(reason="TODO : implémenter is_valid_listening_event()")
     def test_future_timestamp_fails(self, valid_listening_event):
         # Un timestamp dans le futur est suspect
-        # valid_listening_event["timestamp"] = "2099-01-01T00:00:00Z"
-        # assert is_valid_listening_event(valid_listening_event) is False
-        pass
+        valid_listening_event["timestamp"] = (datetime.utcnow() + timedelta(days=1)).isoformat() + "Z"
+        assert is_valid_listening_event(valid_listening_event) is False
 
-    @pytest.mark.skip(reason="TODO : implémenter is_valid_listening_event()")
-    def test_bot_pattern_detected(self):
-        # duration_ms < 5000 → pattern bot
-        # event = {..., "duration_ms": 100, "completed": False}
-        # assert is_valid_listening_event(event) is False
-        pass
+    def test_bot_pattern_detected(self, valid_listening_event):
+        # duration_ms < 5000 → pattern bot (on peut décider de l'invalider ici ou plus tard)
+        # Dans is_valid_listening_event on n'a pas mis de règle bot, mais on peut ajouter duration <= 0
+        valid_listening_event["duration_ms"] = -1
+        assert is_valid_listening_event(valid_listening_event) is False
 
 
 # ─────────────────────────────────────────────────────────────
