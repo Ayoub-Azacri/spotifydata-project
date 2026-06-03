@@ -218,9 +218,11 @@ with DAG(
 
         # -- Redis --------------------------------------------------------
         r = redis_lib.from_url(REDIS_URL, decode_responses=True)
+        r_db0 = redis_lib.from_url("redis://redis:6379/0", decode_responses=True)
         for user_id, track_scores in recommendations.items():
             track_ids = [t for t, _ in track_scores]
             r.setex(f"reco:{user_id}", RECO_TTL_SECONDS, json.dumps(track_ids))
+            r_db0.setex(f"reco:{user_id}", RECO_TTL_SECONDS, json.dumps(track_ids))
 
         # -- PostgreSQL ---------------------------------------------------
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
