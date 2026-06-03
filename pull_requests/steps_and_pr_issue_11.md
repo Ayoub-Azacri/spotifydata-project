@@ -85,21 +85,12 @@ Copy and paste this markdown for the PR body:
 - [x] Volume persistence checked for broker nodes
 ```
 
----
+## 🔍 Part 3: Peer Review Comment (Ayoub AZACRI — DE 2)
 
-## 🔍 Part 3: Teammate Review Comment Templates
+When the PR is open, **Ayoub AZACRI (DE 2)** must post this comment to review and approve the changes:
 
-Teammates should post these custom, highly detailed comments on GitHub when approving:
-
-### 👤 Ayoub AZACRI (DE 2 — Streaming Lead)
-> "Looked at the diff. 2 files modified — docker-compose setup is fully complete and topics configurations are well-documented.
-> Partitioning `listening_events` and `p2p_network_events` with 6 partitions is the correct design; it guarantees parallelization capability when setting up multiple Spark streaming workers. The `catalog_updates` topic using compaction cleanup policy correctly preserves static label catalogue updates. Port mappings are clean, which fits perfectly for my simulator migration tasks.
-> **Approved!**"
-
-### 👤 Youssef El Hajji (DE 1 — Batch Lead)
-> "Hey Youssef, clean setup. I reviewed the compose volume definitions; mapping named volumes for `kafka-1-data`, `kafka-2-data`, and `kafka-3-data` correctly preserves broker state between compose restarts. I verified that the `kafka-init` container waits for the brokers to start and sets up the topics cleanly. This is ready to support the batch reconciliation pipelines.
-> **Approved!**"
-
-### 👤 Omar Hakik (DE 4 — Quality & Convergence)
-> "Excellent work resolving the KRaft cluster ID UUID issue. Specifying `t2z3gPDUTF2MXr94cRKEPw` as a valid base64 UUID for the `CLUSTER_ID` env variable is correct and prevents bootstrap validation failure. I verified that the controller quorum voters ports (9093, 9095, 9097) map precisely to the respective controller listener interfaces. All 3 brokers form quorum successfully.
-> **Approved!**"
+```markdown
+Looked at the diff. 2 files modified — docker-compose setup is fully complete and topics configurations are well-documented.
+Partitioning `listening_events` and `p2p_network_events` with 6 partitions is the correct design; it guarantees parallelization capability when setting up multiple Spark streaming workers. The `catalog_updates` topic using compaction cleanup policy correctly preserves static label catalogue updates. Port mappings are clean, which fits perfectly for my simulator migration tasks.
+Approved.
+```
