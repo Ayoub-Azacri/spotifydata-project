@@ -97,19 +97,29 @@ def create_spark_session() -> SparkSession:
 def read_kafka_stream(spark: SparkSession):
     """
     Lit le topic Kafka `listening_events` en streaming.
-
-    TODO :
-        1. Utiliser spark.readStream.format("kafka")
-        2. Configurer kafka.bootstrap.servers, subscribe, startingOffsets
-        3. Caster la colonne "value" (bytes) en string
-        4. Parser le JSON avec from_json() et LISTENING_EVENT_SCHEMA
-        5. Caster la colonne "timestamp" (string ISO) en TimestampType
-        6. Renommer en "event_time" pour les fenêtres temporelles
-
-    Returns:
-        DataFrame streaming avec colonnes typées
     """
-    raise NotImplementedError("TODO : implémenter read_kafka_stream()")
+    raw = (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", KAFKA_TOPIC)
+        .option("startingOffsets", "latest")
+        .option("failOnDataLoss", "false")
+        .load()
+    )
+
+    parsed = (
+        raw
+        .select(
+            F.from_json(
+                F.col("value").cast("string"),
+                LISTENING_EVENT_SCHEMA,
+            ).alias("data")
+        )
+        .select("data.*")
+        .withColumn("event_time", F.to_timestamp(F.col("timestamp")))
+    )
+    return parsed
 
 
 # ─────────────────────────────────────────────────────────────
@@ -119,34 +129,114 @@ def read_kafka_stream(spark: SparkSession):
 def compute_top_tracks_tumbling(events_df):
     """
     Top 10 des tracks par tumbling window de 5 minutes.
-
-    TODO :
-        1. groupBy(window("event_time", "5 minutes"), "track_id")
-        2. agg(count("*").alias("stream_count"), countDistinct("user_id").alias("unique_listeners"))
-        3. Output mode : "update" (on met à jour au fur et à mesure)
-        4. Écrire dans PostgreSQL table realtime_top_tracks
-
-    Hint : pour écrire dans PostgreSQL depuis Spark Streaming,
-    utiliser foreachBatch() et df.write.jdbc() dans le batch.
     """
-    raise NotImplementedError("TODO : implémenter compute_top_tracks_tumbling()")
+    windowed = (
+        events_df
+        .groupBy(
+            F.window("event_time", "5 minutes"),
+            "track_id"
+        )
+        .agg(
+            F.count("*").alias("stream_count"),
+            F.approx_count_distinct("user_id").alias("unique_listeners")
+        )
+    )
+
+    def write_to_postgres(batch_df, batch_id):
+        import psycopg2
+        rows = batch_df.collect()
+        if not rows:
+            return
+            
+        from pyspark.sql.window import Window
+        window_spec = Window.partitionBy("window").orderBy(F.desc("stream_count"))
+        
+        ranked_df = (
+            batch_df
+            .withColumn("rank", F.row_number().over(window_spec))
+            .filter(F.col("rank") <= 10)
+        )
+        
+        ranked_rows = ranked_df.collect()
+        if not ranked_rows:
+            return
+            
+        try:
+            conn = psycopg2.connect("postgresql://spotify:spotify@postgres:5432/spotify")
+            cur = conn.cursor()
+            for row in ranked_rows:
+                w_start = row.window.start
+                w_end = row.window.end
+                cur.execute("""
+                    INSERT INTO realtime_top_tracks (window_start, window_end, track_id, stream_count, unique_listeners, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (window_start, track_id) DO UPDATE SET
+                        stream_count = EXCLUDED.stream_count,
+                        unique_listeners = EXCLUDED.unique_listeners,
+                        updated_at = NOW()
+                """, (w_start, w_end, row.track_id, row.stream_count, row.unique_listeners))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Error writing to Postgres: {e}")
+
+    query = (
+        windowed.writeStream
+        .foreachBatch(write_to_postgres)
+        .outputMode("update")
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .start()
+    )
+    return query
 
 
 def compute_genre_listeners_sliding(events_df, catalog_df):
     """
     Listeners uniques par genre en sliding window (15 min glissant toutes les 5 min).
-
-    TODO :
-        1. Joindre events_df avec catalog_df (stream-static join sur track_id)
-           pour récupérer le genre du morceau
-        2. groupBy(window("event_time", "15 minutes", "5 minutes"), "genre")
-        3. agg(countDistinct("user_id").alias("unique_listeners"))
-        4. Écrire dans Redis (clé "genre_listeners:live") via foreachBatch
-           Utiliser redis-py dans le batch
-
-    Hint : charger le catalogue PostgreSQL comme DataFrame statique avec spark.read.jdbc()
     """
-    raise NotImplementedError("TODO : implémenter compute_genre_listeners_sliding()")
+    # Join stream-static sur track_id
+    joined = events_df.join(catalog_df, events_df.track_id == catalog_df.id, "inner")
+    
+    windowed = (
+        joined
+        .groupBy(
+            F.window("event_time", "15 minutes", "5 minutes"),
+            "genre"
+        )
+        .agg(
+            F.approx_count_distinct("user_id").alias("unique_listeners")
+        )
+    )
+
+    def write_to_redis(batch_df, batch_id):
+        rows = batch_df.collect()
+        if not rows:
+            return
+            
+        import redis
+        try:
+            r = redis.Redis(host="redis", port=6379, db=1)
+            genre_mapping = {}
+            for row in rows:
+                if row.genre:
+                    genre_mapping[row.genre] = str(row.unique_listeners)
+            if genre_mapping:
+                pipe = r.pipeline()
+                pipe.delete("genre_listeners:live")
+                pipe.hset("genre_listeners:live", mapping=genre_mapping)
+                pipe.execute()
+        except Exception as e:
+            print(f"Error writing to Redis: {e}")
+
+    query = (
+        windowed.writeStream
+        .foreachBatch(write_to_redis)
+        .outputMode("update")
+        .option("checkpointLocation", "s3a://spotify-checkpoints/genre_listeners")
+        .start()
+    )
+    return query
 
 
 # ─────────────────────────────────────────────────────────────
@@ -165,11 +255,11 @@ def main():
     events_df = read_kafka_stream(spark)
 
     # Chargement du catalogue (jointure statique — Phase 2, seq 2.3)
-    # catalog_df = spark.read.jdbc(POSTGRES_URL, "tracks", properties=POSTGRES_PROPS)
+    catalog_df = spark.read.jdbc(POSTGRES_URL, "tracks", properties=POSTGRES_PROPS)
 
     # Agrégations
     query_top_tracks = compute_top_tracks_tumbling(events_df)
-    # query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
+    query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
 
     # Attendre l'arrêt gracieux
     spark.streams.awaitAnyTermination()
