@@ -108,8 +108,10 @@ class P2PSimulator:
         self.kafka_producer = Producer({
             "bootstrap.servers": KAFKA_BOOTSTRAP,
             "acks": "all",
-            "enable.idempotence": True
+            "enable.idempotence": True,
+            "transactional.id": "p2p-simulator-1"
         })
+        self.kafka_producer.init_transactions()
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
@@ -217,7 +219,7 @@ class P2PSimulator:
         if self.mode == "late_events" and random.random() < 0.4:
             delay_minutes = random.randint(5, 30)
             ts = datetime.now(timezone.utc) - timedelta(minutes=delay_minutes)
-            event["timestamp"] = ts.isoformat() + "Z"
+            event["timestamp"] = ts.isoformat().replace("+00:00", "Z")
 
         return event
 
@@ -280,7 +282,9 @@ class P2PSimulator:
         Publier payload dans le topic Kafka.
         """
         try:
+            self.kafka_producer.begin_transaction()
             self.kafka_producer.produce(topic, key=key, value=payload)
+            self.kafka_producer.commit_transaction()
             self.kafka_producer.poll(0)
         except Exception as e:
             logger.error(f"Échec de publication Kafka sur {topic} : {e}")
