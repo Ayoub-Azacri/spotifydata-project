@@ -1,1 +1,37 @@
+# ============================================================
+# SPOTIFY Distributed Data Platform — Kafka Topics Config
+# ============================================================
 
+bootstrap_servers:
+  - kafka-1:9092
+  - kafka-2:9094
+  - kafka-3:9096
+
+topics:
+  listening_events:
+    partitions: 6
+    replication_factor: 3
+    configs:
+      retention.ms: 604800000  # 7 jours de rétention
+      
+  p2p_network_events:
+    partitions: 6
+    replication_factor: 3
+    
+  catalog_updates:
+    partitions: 3
+    replication_factor: 3
+    configs:
+      cleanup.policy: compact
+      
+  enriched_events:
+    partitions: 6
+    replication_factor: 3
+    
+  fraud_alerts:
+    partitions: 3
+    replication_factor: 3
+    
+  late_listening_events:
+    partitions: 3
+    replication_factor: 3
