@@ -27,7 +27,7 @@ from typing import Optional
 import redis
 
 # Phase 2 — décommenter quand Kafka est prêt
-# from confluent_kafka import Producer
+from confluent_kafka import Producer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +40,16 @@ logger = logging.getLogger("p2p_simulator")
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────
 
-REDIS_URL = "redis://localhost:6379/1"
-KAFKA_BOOTSTRAP = "kafka-1:9092"       # Phase 2
+import os
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
+
+# Tente de résoudre kafka-1 pour déterminer si on est dans Docker ou en local
+import socket
+try:
+    socket.gethostbyname("kafka-1")
+    KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka-1:9092")
+except socket.gaierror:
+    KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "localhost:9092")
 
 TOPICS = {
     "listening":   "listening_events",
@@ -97,15 +105,61 @@ class P2PSimulator:
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
 
         # Phase 2 — Kafka producer
-        # self.kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+        self.kafka_producer = Producer({
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "acks": "all",
+            "enable.idempotence": True
+        })
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
+
+        # Charger le catalogue et enregistrer les peers pour satisfaire les clés étrangères Postgres
+        self._load_catalog_and_register_peers()
 
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
         logger.info(f"Simulateur démarré | mode={mode} | peers={n_peers} | rate={events_per_second} evt/s")
+
+    def _load_catalog_and_register_peers(self):
+        """Charge les track_ids depuis PostgreSQL et insère les peers actifs."""
+        import psycopg2
+        global SAMPLE_TRACKS
+        try:
+            # Tente de se connecter en local d'abord, puis via le réseau docker
+            try:
+                conn = psycopg2.connect("postgresql://spotify:spotify@localhost:5432/spotify")
+            except Exception:
+                conn = psycopg2.connect("postgresql://spotify:spotify@postgres:5432/spotify")
+                
+            cur = conn.cursor()
+            
+            # 1. Charger les tracks existantes
+            cur.execute("SELECT id, duration_ms, title FROM tracks LIMIT 500")
+            rows = cur.fetchall()
+            if rows:
+                SAMPLE_TRACKS = [{"id": str(r[0]), "title": r[2], "duration_ms": r[1]} for r in rows]
+                logger.info(f"Chargé {len(SAMPLE_TRACKS)} tracks depuis PostgreSQL.")
+            else:
+                logger.warning("Aucune track trouvée dans PostgreSQL. Utilisation de SAMPLE_TRACKS par défaut.")
+                
+            # 2. Enregistrer les peers actifs
+            for peer_id in self.active_peers:
+                cur.execute(
+                    """
+                    INSERT INTO peers (id, peer_name, status)
+                    VALUES (%s, %s, 'online')
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (peer_id, f"Peer-{peer_id[:8]}",)
+                )
+            conn.commit()
+            logger.info(f"Enregistré {len(self.active_peers)} peers actifs dans PostgreSQL.")
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Échec de connexion PostgreSQL / chargement catalogue : {e}")
 
     def run(self):
         """Boucle principale : génère et publie des événements en continu."""
@@ -202,7 +256,7 @@ class P2PSimulator:
 
         self._publish_to_redis(channel, payload)
         # Phase 2 — décommenter quand Kafka est prêt
-        # self._publish_to_kafka(channel, event.get("user_id", event.get("peer_id", "")), payload)
+        self._publish_to_kafka(channel, event.get("user_id", event.get("peer_id", "")), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
         """
@@ -221,19 +275,24 @@ class P2PSimulator:
         except Exception as e:
             logger.error(f"Échec de publication Redis sur {channel} : {e}")
 
-    # def _publish_to_kafka(self, topic: str, key: str, payload: str):
-    #     """
-    #     TODO Phase 2 : publier payload dans le topic Kafka.
-    #     """
-    #     try:
-    #         self.kafka_producer.produce(topic, key=key, value=payload)
-    #         self.kafka_producer.poll(0)
-    #     except Exception as e:
-    #         logger.error(f"Échec de publication Kafka sur {topic} : {e}")
+    def _publish_to_kafka(self, topic: str, key: str, payload: str):
+        """
+        Publier payload dans le topic Kafka.
+        """
+        try:
+            self.kafka_producer.produce(topic, key=key, value=payload)
+            self.kafka_producer.poll(0)
+        except Exception as e:
+            logger.error(f"Échec de publication Kafka sur {topic} : {e}")
 
     def _shutdown(self, signum, frame):
         logger.info(f"Arrêt du simulateur (signal {signum}) — {self.event_count} événements publiés")
         self.running = False
+        try:
+            logger.info("Flushing Kafka producer...")
+            self.kafka_producer.flush(timeout=5)
+        except Exception as e:
+            logger.error(f"Erreur lors du flush du Kafka producer : {e}")
 
 
 # ─────────────────────────────────────────────────────────────

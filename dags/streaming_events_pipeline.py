@@ -147,7 +147,7 @@ with DAG(
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         # On récupère le titre et l'id artiste pour enrichir l'événement
         df_tracks = hook.get_pandas_df(
-            "SELECT id as track_id, title as track_title FROM tracks WHERE id = ANY(%s)",
+            "SELECT id as track_id, title as track_title FROM tracks WHERE id = ANY(%s::uuid[])",
             parameters=(track_ids,)
         )
         
