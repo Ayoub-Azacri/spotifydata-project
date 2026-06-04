@@ -254,12 +254,34 @@ def main():
     # Lecture Kafka
     events_df = read_kafka_stream(spark)
 
+    # 1. Router les late events (> 10 minutes) vers le topic dédié
+    late_events = events_df.filter(
+        F.col("event_time") < F.current_timestamp() - F.expr("INTERVAL 10 MINUTES")
+    )
+    query_late = (
+        late_events
+        .select(F.to_json(F.struct("*")).alias("value"))
+        .writeStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("topic", "late_listening_events")
+        .option("checkpointLocation", "s3a://spotify-checkpoints/late_events")
+        .start()
+    )
+
+    # 2. Filtrer et appliquer le watermark (10 minutes) sur les events normaux
+    normal_events = (
+        events_df
+        .filter(F.col("event_time") >= F.current_timestamp() - F.expr("INTERVAL 10 MINUTES"))
+        .withWatermark("event_time", "10 minutes")
+    )
+
     # Chargement du catalogue (jointure statique — Phase 2, seq 2.3)
     catalog_df = spark.read.jdbc(POSTGRES_URL, "tracks", properties=POSTGRES_PROPS)
 
-    # Agrégations
-    query_top_tracks = compute_top_tracks_tumbling(events_df)
-    query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
+    # 3. Exécuter les agrégations sur les normal_events watermarqués
+    query_top_tracks = compute_top_tracks_tumbling(normal_events)
+    query_genres     = compute_genre_listeners_sliding(normal_events, catalog_df)
 
     # Attendre l'arrêt gracieux
     spark.streams.awaitAnyTermination()
