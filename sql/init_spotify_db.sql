@@ -124,6 +124,7 @@ CREATE TABLE recommendations (
     user_id         UUID NOT NULL,
     track_id        UUID NOT NULL REFERENCES tracks(id),
     score           FLOAT NOT NULL,
+    rank            INT,
     generated_at    TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (user_id, track_id)
 );

@@ -78,6 +78,7 @@ with DAG(
         external_dag_id="aggregation_pipeline",
         external_task_id=None,
         allowed_states=["success"],
+        execution_delta=timedelta(hours=1),
         timeout=3600,
         poke_interval=60,
         mode="reschedule",
