@@ -99,12 +99,12 @@ Faire évoluer la stack vers le temps réel avec Kafka et Spark.
 ```
 
 **Critères de validation Phase 2 :**
-- [ ] Les 3 jobs Spark tournent en continu
-- [ ] Les tendances temps réel se mettent à jour en quelques secondes
-- [ ] La détection de fraude génère des alertes correctes
-- [ ] Après arrêt/relance Spark, reprise sans perte ni doublon
-- [ ] Les agrégats batch et streaming convergent
-- [ ] Les late events sont routés et retraités par Airflow
+- [x] Les 3 jobs Spark tournent en continu
+- [x] Les tendances temps réel se mettent à jour en quelques secondes
+- [x] La détection de fraude génère des alertes correctes
+- [x] Après arrêt/relance Spark, reprise sans perte ni doublon
+- [x] Les agrégats batch et streaming convergent
+- [x] Les late events sont routés et retraités par Airflow
 
 ---
 
