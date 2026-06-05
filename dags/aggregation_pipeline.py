@@ -12,20 +12,20 @@ Architecture :
         → update_aggregates()       ← écriture PostgreSQL
 
 TODO :
-    [ ] Implémenter compute_top_tracks()
-    [ ] Implémenter compute_artist_stats()
-    [ ] Implémenter compute_p2p_metrics()
-    [ ] Implémenter update_aggregates()
     [ ] Configurer correctement l'ExternalTaskSensor
     [ ] Stratégie incrémentale : calculer uniquement pour la date d'exécution
     [ ] Ajouter doc_md sur ce DAG
 """
 
+import logging
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.decorators import task
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sensors.external_task import ExternalTaskSensor
+
+logger = logging.getLogger(__name__)
 
 DAG_DOC = """
 ## aggregation_pipeline
@@ -44,9 +44,6 @@ Attend la fin de `streaming_events_pipeline` via ExternalTaskSensor.
 ### Stratégie
 Incrémentale : calcule uniquement pour `execution_date` (le jour courant).
 Idempotente : INSERT ... ON CONFLICT (track_id, date) DO UPDATE SET ...
-
-### TODO
-Compléter les 4 tâches marquées NotImplementedError.
 """
 
 DEFAULT_ARGS = {
@@ -86,64 +83,241 @@ with DAG(
     def compute_top_tracks(**context) -> list:
         """
         Calcule le top 50 des tracks pour la date d'exécution.
-
-        TODO :
-            1. Récupérer execution_date depuis context["data_interval_start"]
-            2. Requête SQL :
-               SELECT track_id,
-                      COUNT(*) as total_streams,
-                      COUNT(DISTINCT user_id) as unique_listeners,
-                      SUM(duration_ms) as total_duration_ms,
-                      ARRAY_AGG(DISTINCT geo_country) as countries
-               FROM listening_events
-               WHERE DATE(timestamp) = %(date)s AND completed = TRUE
-               GROUP BY track_id
-               ORDER BY total_streams DESC
-               LIMIT 50
-            3. Retourner la liste des agrégats
+        Requête incrémentale sur listening_events filtrée par date.
         """
-        raise NotImplementedError("TODO : implémenter compute_top_tracks()")
+        exec_date = context["data_interval_start"].date()
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                track_id::text,
+                COUNT(*)                        AS total_streams,
+                COUNT(DISTINCT user_id)         AS unique_listeners,
+                COALESCE(SUM(duration_ms), 0)   AS total_duration_ms,
+                ARRAY_AGG(DISTINCT geo_country) FILTER (WHERE geo_country IS NOT NULL) AS countries
+            FROM listening_events
+            WHERE DATE(timestamp) = %s
+              AND completed = TRUE
+            GROUP BY track_id
+            ORDER BY total_streams DESC
+            LIMIT 50
+            """,
+            (exec_date,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = [
+            {
+                "track_id":          row[0],
+                "date":              str(exec_date),
+                "total_streams":     row[1],
+                "unique_listeners":  row[2],
+                "total_duration_ms": row[3],
+                "countries":         row[4] or [],
+            }
+            for row in rows
+        ]
+
+        logger.info("compute_top_tracks: %d tracks for %s", len(result), exec_date)
+        return result
 
     @task(task_id="compute_artist_stats")
     def compute_artist_stats(**context) -> list:
         """
         Calcule les statistiques par artiste pour la date d'exécution.
-
-        TODO :
-            1. Jointure listening_events × tracks × artists
-            2. GROUP BY artist_id, date
-            3. Métriques : total_streams, unique_listeners, top_track_id
-            4. Retourner la liste des stats artistes
+        Jointure listening_events x tracks pour obtenir artist_id.
         """
-        raise NotImplementedError("TODO : implémenter compute_artist_stats()")
+        exec_date = context["data_interval_start"].date()
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                t.artist_id::text,
+                COUNT(le.id)                AS total_streams,
+                COUNT(DISTINCT le.user_id)  AS unique_listeners,
+                (
+                    SELECT le2.track_id::text
+                    FROM listening_events le2
+                    WHERE le2.track_id = ANY(
+                        SELECT id FROM tracks WHERE artist_id = t.artist_id
+                    )
+                    AND DATE(le2.timestamp) = %s
+                    AND le2.completed = TRUE
+                    GROUP BY le2.track_id
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 1
+                ) AS top_track_id
+            FROM listening_events le
+            JOIN tracks t ON le.track_id = t.id
+            WHERE DATE(le.timestamp) = %s
+              AND le.completed = TRUE
+            GROUP BY t.artist_id
+            ORDER BY total_streams DESC
+            """,
+            (exec_date, exec_date),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = [
+            {
+                "artist_id":       row[0],
+                "date":            str(exec_date),
+                "total_streams":   row[1],
+                "unique_listeners": row[2],
+                "top_track_id":    row[3],
+            }
+            for row in rows
+        ]
+
+        logger.info("compute_artist_stats: %d artists for %s", len(result), exec_date)
+        return result
 
     @task(task_id="compute_p2p_metrics")
     def compute_p2p_metrics(**context) -> dict:
         """
         Calcule les métriques du réseau P2P pour la date d'exécution.
-
-        TODO :
-            1. Taux de cache_hit (event_source='cache' / total)
-            2. Latence moyenne des transferts P2P
-            3. Nombre de peers actifs uniques
-            4. Distribution des écoutes par device_type et geo_country
-            5. Retourner un dict de métriques
         """
-        raise NotImplementedError("TODO : implémenter compute_p2p_metrics()")
+        exec_date = context["data_interval_start"].date()
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE event_source = 'cache')::float
+                    / NULLIF(COUNT(*), 0) AS cache_hit_rate,
+                AVG(duration_ms)          AS avg_duration_ms,
+                COUNT(DISTINCT source_peer_id) FILTER (WHERE source_peer_id IS NOT NULL) AS active_peers
+            FROM listening_events
+            WHERE DATE(timestamp) = %s
+            """,
+            (exec_date,),
+        )
+        row = cur.fetchone()
+
+        cur.execute(
+            """
+            SELECT device_type, COUNT(*) as cnt
+            FROM listening_events
+            WHERE DATE(timestamp) = %s AND device_type IS NOT NULL
+            GROUP BY device_type ORDER BY cnt DESC
+            """,
+            (exec_date,),
+        )
+        device_dist = {r[0]: r[1] for r in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT geo_country, COUNT(*) as cnt
+            FROM listening_events
+            WHERE DATE(timestamp) = %s AND geo_country IS NOT NULL
+            GROUP BY geo_country ORDER BY cnt DESC LIMIT 10
+            """,
+            (exec_date,),
+        )
+        country_dist = {r[0]: r[1] for r in cur.fetchall()}
+
+        cur.close()
+        conn.close()
+
+        metrics = {
+            "date":                str(exec_date),
+            "cache_hit_rate":      round(row[0] or 0.0, 4),
+            "avg_duration_ms":     round(row[1] or 0.0, 2),
+            "active_peers":        row[2] or 0,
+            "device_distribution": device_dist,
+            "country_distribution": country_dist,
+        }
+
+        logger.info("compute_p2p_metrics: cache_hit=%.2f%%, active_peers=%d",
+                    metrics["cache_hit_rate"] * 100, metrics["active_peers"])
+        return metrics
 
     @task(task_id="update_aggregates")
     def update_aggregates(top_tracks: list, artist_stats: list, p2p_metrics: dict, **context):
         """
         Écrit les agrégats dans PostgreSQL de façon idempotente.
-
-        TODO :
-            1. UPSERT dans daily_streams :
-               INSERT INTO daily_streams (track_id, date, total_streams, ...)
-               VALUES ... ON CONFLICT (track_id, date) DO UPDATE SET ...
-            2. UPSERT dans artist_stats
-            3. Logger les stats : "Top track: {title} avec {N} streams"
+        ON CONFLICT DO UPDATE sur (track_id, date) et (artist_id, date).
         """
-        raise NotImplementedError("TODO : implémenter update_aggregates()")
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cur = conn.cursor()
+
+        try:
+            # ── daily_streams ─────────────────────────────────
+            for row in top_tracks:
+                cur.execute(
+                    """
+                    INSERT INTO daily_streams
+                        (track_id, date, total_streams, unique_listeners, total_duration_ms, countries, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (track_id, date) DO UPDATE SET
+                        total_streams     = EXCLUDED.total_streams,
+                        unique_listeners  = EXCLUDED.unique_listeners,
+                        total_duration_ms = EXCLUDED.total_duration_ms,
+                        countries         = EXCLUDED.countries,
+                        updated_at        = NOW()
+                    """,
+                    (
+                        row["track_id"],
+                        row["date"],
+                        row["total_streams"],
+                        row["unique_listeners"],
+                        row["total_duration_ms"],
+                        row["countries"],
+                    ),
+                )
+
+            # ── artist_stats ──────────────────────────────────
+            for row in artist_stats:
+                cur.execute(
+                    """
+                    INSERT INTO artist_stats
+                        (artist_id, date, total_streams, unique_listeners, top_track_id, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (artist_id, date) DO UPDATE SET
+                        total_streams    = EXCLUDED.total_streams,
+                        unique_listeners = EXCLUDED.unique_listeners,
+                        top_track_id     = EXCLUDED.top_track_id,
+                        updated_at       = NOW()
+                    """,
+                    (
+                        row["artist_id"],
+                        row["date"],
+                        row["total_streams"],
+                        row["unique_listeners"],
+                        row["top_track_id"],
+                    ),
+                )
+
+            conn.commit()
+
+            logger.info(
+                "✅ update_aggregates done — %d top_tracks, %d artist_stats upserted | "
+                "P2P: cache_hit=%.2f%%, peers=%d",
+                len(top_tracks), len(artist_stats),
+                p2p_metrics.get("cache_hit_rate", 0) * 100,
+                p2p_metrics.get("active_peers", 0),
+            )
+
+        except Exception as e:
+            conn.rollback()
+            logger.error("❌ update_aggregates failed: %s", e)
+            raise
+        finally:
+            cur.close()
+            conn.close()
 
     # ── Orchestration ─────────────────────────────────────────
     top_tracks   = compute_top_tracks()

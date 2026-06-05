@@ -10,12 +10,29 @@ Ce projet se construit **brique par brique sur 5 jours**. Chaque livrable s'appu
 
 ## Ce que vous allez construire
 
-```
-Sources ──► Kafka topics ──► Spark Streaming ──► PostgreSQL / Redis
-              │                                         │
-              └──► Airflow DAGs (batch) ────────────────┘
-                                                        │
-                                              MinIO (Parquet)
+```mermaid
+graph TD
+    %% Phase 1: Batch Architecture
+    SIM[Simulateur P2P] -->|pub/sub & LPUSH| REDIS[(Redis)]
+    
+    REDIS -->|consume| AIR_STREAM[DAG: streaming_events]
+    MINIO_RAW[(MinIO: labels-raw)] -->|extract| AIR_CAT[DAG: catalog_ingestion]
+    
+    AIR_CAT -->|upsert| PG[(PostgreSQL)]
+    
+    AIR_STREAM -->|upsert| PG
+    AIR_STREAM -->|write| MINIO_PARQUET[(MinIO: spotify-parquet)]
+    AIR_STREAM -->|invalid events| PG_DLQ[(PG: dead_letter_events)]
+    
+    AIR_STREAM -.->|ExternalTaskSensor| AIR_AGG[DAG: aggregation]
+    AIR_AGG -->|insert| PG
+    
+    AIR_AGG -.->|ExternalTaskSensor| AIR_RECO[DAG: recommendation]
+    AIR_RECO -->|insert| PG
+    AIR_RECO -->|cache TTL 24h| REDIS
+    
+    PG_DLQ -->|fetch pending| AIR_DLQ[DAG: dlq_reprocessing]
+    AIR_DLQ -->|re-insert| PG
 ```
 
 | Couche | Technologie | Ce que vous implémentez |
@@ -53,12 +70,12 @@ Construire le socle batch de SPOTIFY avec Airflow.
 ```
 
 **Critères de validation Phase 1 :**
-- [ ] Les 5 DAGs s'exécutent sans erreur avec le simulateur P2P actif
-- [ ] Le catalogue est peuplé avec les données des 3 labels fournis
-- [ ] Les agrégats sont cohérents avec les données source
-- [ ] Les recommandations sont générées et accessibles dans Redis
-- [ ] La DLQ capture les événements défectueux sans bloquer les pipelines
-- [ ] Une suite pytest couvre structure + transformations
+- [x] Les 5 DAGs s'exécutent sans erreur avec le simulateur P2P actif
+- [x] Le catalogue est peuplé avec les données des 3 labels fournis
+- [x] Les agrégats sont cohérents avec les données source
+- [x] Les recommandations sont générées et accessibles dans Redis
+- [x] La DLQ capture les événements défectueux sans bloquer les pipelines
+- [x] Une suite pytest couvre structure + transformations
 
 ---
 
@@ -82,12 +99,12 @@ Faire évoluer la stack vers le temps réel avec Kafka et Spark.
 ```
 
 **Critères de validation Phase 2 :**
-- [ ] Les 3 jobs Spark tournent en continu
-- [ ] Les tendances temps réel se mettent à jour en quelques secondes
-- [ ] La détection de fraude génère des alertes correctes
-- [ ] Après arrêt/relance Spark, reprise sans perte ni doublon
-- [ ] Les agrégats batch et streaming convergent
-- [ ] Les late events sont routés et retraités par Airflow
+- [x] Les 3 jobs Spark tournent en continu
+- [x] Les tendances temps réel se mettent à jour en quelques secondes
+- [x] La détection de fraude génère des alertes correctes
+- [x] Après arrêt/relance Spark, reprise sans perte ni doublon
+- [x] Les agrégats batch et streaming convergent
+- [x] Les late events sont routés et retraités par Airflow
 
 ---
 

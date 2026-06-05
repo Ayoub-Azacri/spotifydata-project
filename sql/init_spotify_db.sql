@@ -124,6 +124,7 @@ CREATE TABLE recommendations (
     user_id         UUID NOT NULL,
     track_id        UUID NOT NULL REFERENCES tracks(id),
     score           FLOAT NOT NULL,
+    rank            INT,
     generated_at    TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (user_id, track_id)
 );
@@ -190,6 +191,16 @@ CREATE TABLE federated_catalog (
     PRIMARY KEY (track_id, source_group)
 );
 
+CREATE TABLE reconciliation_reports (
+    id SERIAL PRIMARY KEY,
+    reconciliation_date DATE NOT NULL UNIQUE,
+    total_tracks_compared INT,
+    total_divergent_tracks INT,
+    max_divergence_pct FLOAT,
+    report_json JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- ============================================================
 -- DONNÉES DE RÉFÉRENCE
 -- ============================================================
@@ -204,3 +215,4 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO spotify;
 COMMENT ON TABLE listening_events IS 'Événements d''écoute générés par le simulateur P2P. Partitionnable par timestamp pour la parallélisation.';
 COMMENT ON TABLE dead_letter_events IS 'Dead Letter Queue — événements défectueux isolés pour audit et retraitement.';
 COMMENT ON TABLE realtime_top_tracks IS 'Alimentée par Spark Structured Streaming (job streaming_trends_job). Fenêtres de 5 min.';
+COMMENT ON TABLE reconciliation_reports IS 'Rapports de réconciliation quotidienne entre les agrégats batch (daily_streams) et temps réel (realtime_top_tracks).';
